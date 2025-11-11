@@ -114,7 +114,7 @@ def sensitivity_analysis(market_avg_price, **kwargs):
 
 # ===================== 页面 =====================
 st.set_page_config(page_title="安徽电力零售收益模拟器", layout="wide")
-st.title("⚡ 安徽电力零售收益模拟器（合同增强版 · 去除绿电百分比溢价）")
+st.title("⚡ 安徽电力零售收益模拟器（2026合同版）")
 
 # ---- 基础参数 ----
 st.subheader("一、基础参数")
@@ -295,3 +295,4 @@ if results:
         green_fix_price=green_fix_price,
     )
     st.line_chart(sens_df.set_index("市场均价变动(%)"))
+
