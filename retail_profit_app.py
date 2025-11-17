@@ -119,7 +119,7 @@ st.title("⚡ 安徽电力零售收益模拟器（2026合同版）")
 # ---- 基础参数 ----
 st.subheader("一、基础参数")
 b1, b2, b3 = st.columns(3)
-total_power_mwh = b1.number_input("售电总电量 (MWh)", 0.0, 100000.0, 5000.0, step=100.0)
+total_power_mwh = b1.number_input("售电总电量 (MWh)", 0.0, 1000000000.0, 5000.0, step=100.0)
 wholesale_price = b1.number_input("批发购电成本 (元/kWh)", 0.0000, 2.0000, 0.6800, step=0.0001, format="%.4f")
 
 market_avg_price = b2.number_input("市场均价 P_market (元/kWh)", 0.0000, 2.0000, 0.7500, step=0.0001, format="%.4f")
@@ -295,4 +295,5 @@ if results:
         green_fix_price=green_fix_price,
     )
     st.line_chart(sens_df.set_index("市场均价变动(%)"))
+
 
