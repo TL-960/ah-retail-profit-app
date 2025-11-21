@@ -398,7 +398,32 @@ def make_contract_curve_sd(total_user_mwh, ratio):
     return total_user_mwh * ratio * SD_TYPICAL_24
 
 # =====================================================================
-# 六、通用成本计算函数（支持 24 或 48 点，单位：MWh & 元/MWh）
+# 六、通用白天用电比例计算（9:00–15:00）
+# =====================================================================
+
+def calc_daytime_ratio(user_curve):
+    """
+    白天用电比例（9:00–15:00）
+    24 点：取 index 9~14 共 6 点
+    48 点：取 index 18~29 共 12 半小时点
+    """
+    n = len(user_curve)
+    total = float(np.sum(user_curve))
+    if total <= 0:
+        return 0.0
+
+    if n == 24:
+        day_energy = float(np.sum(user_curve[9:15]))
+    elif n == 48:
+        day_energy = float(np.sum(user_curve[18:30]))
+    else:
+        raise ValueError(f"不支持的曲线点数：{n}")
+
+    return day_energy / total
+
+
+# =====================================================================
+# 七、通用成本计算函数（支持 24 或 48 点，单位：MWh & 元/MWh）
 # =====================================================================
 
 def calc_cost(user_curve,
@@ -449,7 +474,7 @@ def calc_cost(user_curve,
     }
 
 # =====================================================================
-# 七、Streamlit UI
+# 八、Streamlit UI
 # =====================================================================
 
 st.set_page_config(page_title="多省电力零售成本测算（皖/闽/浙/鲁）", layout="wide")
@@ -546,6 +571,9 @@ if province == "安徽":
 
     res = calc_cost(user_curve, contract_curve, long_price_curve, spot_curve)
 
+    day_ratio = calc_daytime_ratio(user_curve)
+    st.write(f"🌞 白天用电占比（9–15 点）：**{day_ratio * 100:.4f}%**")
+
     st.success(f"📌 安徽：平均购电成本 = **{res['final_avg']:.4f} 元/MWh**")
 
     with st.expander("展开查看成本明细（安徽）"):
@@ -606,6 +634,9 @@ elif province == "福建":
 
     res = calc_cost(user_curve, contract_curve, long_price_curve,
                     spot_curve, allocation_price)
+
+    day_ratio = calc_daytime_ratio(user_curve)
+    st.write(f"🌞 白天用电占比（9–15 点）：**{day_ratio * 100:.4f}%**")
 
     valley_ratio = calc_valley_ratio_fj(user_curve, month)
 
@@ -684,6 +715,9 @@ elif province == "浙江":
     res = calc_cost(user_curve, contract_curve, long_price_curve,
                     spot_curve, allocation_price)
 
+    day_ratio = calc_daytime_ratio(user_curve)
+    st.write(f"🌞 白天用电占比（9–15 点）：**{day_ratio * 100:.4f}%**")
+
     if allocation_price is None:
         st.success(
             f"📌 浙江：基础平均购电成本（不含分摊） = **{res['base_avg']:.4f} 元/MWh**"
@@ -758,6 +792,9 @@ else:  # 山东
 
     res = calc_cost(user_curve, contract_curve, long_price_curve,
                     spot_curve, allocation_price)
+
+    day_ratio = calc_daytime_ratio(user_curve)
+    st.write(f"🌞 白天用电占比（9–15 点）：**{day_ratio * 100:.4f}%**")
 
     if allocation_price is None:
         st.success(
