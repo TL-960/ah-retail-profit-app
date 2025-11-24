@@ -25,44 +25,50 @@ def parse_numbers_from_text(raw: str, expected_len: int):
         return None
     return arr
 
-
 def load_curve_from_excel(uploaded_file, expected_len: int):
     """
-    从上传的 Excel 中读出 expected_len 个数字（更鲁棒版本）：
-    - header=None：不设表头，原样读取；
-    - 扫描整个工作表（所有行列），按行展开；
-    - 对每个单元格：
-        * 为 NaN 则跳过；
-        * 尝试 float(str(x).strip())，失败则跳过（自动忽略表头、文字说明）；
-    - 收集到的数字数量 >= expected_len 时，取前 expected_len 个；
-    - 否则返回 None。
+    更稳健的 Excel 曲线读取函数，兼容 Streamlit Cloud。
+    - 自动 reset BytesIO 指针
+    - 兼容多个 sheet
+    - 展平所有单元格
+    - 自动过滤 NaN、空白、字符串等
     """
     try:
-        df = pd.read_excel(uploaded_file, header=None)
-    except Exception:
-        return None
+        if uploaded_file is None:
+            return None
 
-    values = df.values.flatten()
-    nums = []
-    for x in values:
-        if pd.isna(x):
-            continue
-        s = str(x).strip()
-        if s == "":
-            continue
+        # Streamlit 的 BytesIO 文件必须 seek(0)，否则 pandas 会读到空内容
         try:
-            v = float(s)
+            uploaded_file.seek(0)
         except Exception:
-            # 非数字内容（表头、文字等）直接跳过
-            continue
-        nums.append(v)
+            pass  # 有些 streamlit 对象不支持 seek，忽略即可
 
-    if len(nums) < expected_len:
+        # 关键：读取所有 sheet（header=None 强制不识别第一行当表头）
+        df_dict = pd.read_excel(uploaded_file, header=None, sheet_name=None)
+
+        all_vals = []
+
+        # 遍历所有 sheet
+        for _, df in df_dict.items():
+            vals = df.values.flatten()
+            for v in vals:
+                if pd.isna(v):
+                    continue
+                try:
+                    all_vals.append(float(v))
+                except Exception:
+                    continue  # 跳过非数字内容
+
+        # 数量不足
+        if len(all_vals) < expected_len:
+            return None
+
+        # 返回前 expected_len 个数字
+        return np.array(all_vals[:expected_len], dtype=float)
+
+    except Exception as e:
+        st.error(f"Excel 解析失败: {e}")
         return None
-
-    arr = np.array(nums[:expected_len], dtype=float)
-    return arr
-
 
 # =====================================================================
 # 一、各省默认现货价格曲线（单位：元/MWh）
