@@ -9,11 +9,11 @@ import pandas as pd
 def parse_numbers_from_text(raw: str, expected_len: int):
     """
     从文本中解析 expected_len 个数字，分隔符支持：逗号（中英文）、空格、换行、Tab。
-    数字不足或多于 expected_len 时，返回 None。
+    如果成功返回 numpy.array(float)，长度必须 == expected_len，失败返回 None。
     """
     if not raw:
         return None
-    # 统一分隔符
+    # 统一分隔符为空格
     for sep in ["，", ",", "\n", "\t", " "]:
         raw = raw.replace(sep, " ")
     parts = [p for p in raw.split(" ") if p.strip() != ""]
@@ -28,20 +28,40 @@ def parse_numbers_from_text(raw: str, expected_len: int):
 
 def load_curve_from_excel(uploaded_file, expected_len: int):
     """
-    从上传的 Excel 中读出 expected_len 个数字：
-    - 不设表头，直接读取所有单元格，按行展平后取前 expected_len 个非 NaN 值。
-    - 如果有效数字数量 < expected_len，返回 None。
+    从上传的 Excel 中读出 expected_len 个数字（更鲁棒版本）：
+    - header=None：不设表头，原样读取；
+    - 扫描整个工作表（所有行列），按行展开；
+    - 对每个单元格：
+        * 为 NaN 则跳过；
+        * 尝试 float(str(x).strip())，失败则跳过（自动忽略表头、文字说明）；
+    - 收集到的数字数量 >= expected_len 时，取前 expected_len 个；
+    - 否则返回 None。
     """
     try:
         df = pd.read_excel(uploaded_file, header=None)
-        values = df.values.flatten()
-        nums = [float(x) for x in values if pd.notna(x)]
-        if len(nums) < expected_len:
-            return None
-        arr = np.array(nums[:expected_len], dtype=float)
-        return arr
     except Exception:
         return None
+
+    values = df.values.flatten()
+    nums = []
+    for x in values:
+        if pd.isna(x):
+            continue
+        s = str(x).strip()
+        if s == "":
+            continue
+        try:
+            v = float(s)
+        except Exception:
+            # 非数字内容（表头、文字等）直接跳过
+            continue
+        nums.append(v)
+
+    if len(nums) < expected_len:
+        return None
+
+    arr = np.array(nums[:expected_len], dtype=float)
+    return arr
 
 
 # =====================================================================
@@ -239,7 +259,6 @@ def calc_valley_ratio_fj(user_curve, month):
 # 四、浙江配置（典型负荷曲线 48 点 + 48 点 TOU）
 # =====================================================================
 
-# 典型负荷：1–11 月（48 点，占比）
 ZJ_LOAD_JAN_NOV_48_RAW = np.array([
     0.019318, 0.018629, 0.018042, 0.017565,
     0.017173, 0.017173, 0.016639, 0.016467,
@@ -256,7 +275,6 @@ ZJ_LOAD_JAN_NOV_48_RAW = np.array([
 ], dtype=float)
 ZJ_LOAD_JAN_NOV_48 = ZJ_LOAD_JAN_NOV_48_RAW / ZJ_LOAD_JAN_NOV_48_RAW.sum()
 
-# 典型负荷：12 月（48 点，占比）
 ZJ_LOAD_DEC_48_RAW = np.array([
     0.018877, 0.018642, 0.018193, 0.017830,
     0.017526, 0.017526, 0.016997, 0.016788,
@@ -273,42 +291,26 @@ ZJ_LOAD_DEC_48_RAW = np.array([
 ], dtype=float)
 ZJ_LOAD_DEC_48 = ZJ_LOAD_DEC_48_RAW / ZJ_LOAD_DEC_48_RAW.sum()
 
-# 春秋季 TOU（2–6 月、9–11 月，48 点）
 TOU_ZJ_SPRING_AUTUMN_48 = [
-    # 00:00–07:00 → 谷（14 半小时：0-13）
     "谷","谷","谷","谷","谷","谷","谷",
     "谷","谷","谷","谷","谷","谷","谷",
-    # 07:00–11:00 → 平（14-21）
     "平","平","平","平","平","平","平","平",
-    # 11:00–14:00 → 谷（22-27）
     "谷","谷","谷","谷","谷","谷",
-    # 14:00–16:00 → 平（28-31）
     "平","平","平","平",
-    # 16:00–23:00 → 峰（32-45）
     "峰","峰","峰","峰","峰","峰","峰",
     "峰","峰","峰","峰","峰","峰","峰",
-    # 23:00–24:00 → 平（46-47）
     "平","平"
 ]
 
-# 夏冬季 TOU（1、7、8、12 月，48 点）
 TOU_ZJ_SUMMER_WINTER_48 = [
-    # 00:00–07:00 → 谷
     "谷","谷","谷","谷","谷","谷","谷",
     "谷","谷","谷","谷","谷","谷","谷",
-    # 07:00–11:00 → 平
     "平","平","平","平","平","平","平","平",
-    # 11:00–14:00 → 谷
     "谷","谷","谷","谷","谷","谷",
-    # 14:00–16:00 → 平
     "平","平","平","平",
-    # 16:00–18:00 → 峰
     "峰","峰","峰","峰",
-    # 18:00–22:00 → 尖
     "尖","尖","尖","尖","尖","尖","尖","尖",
-    # 22:00–23:00 → 峰
     "峰","峰",
-    # 23:00–24:00 → 平
     "平","平"
 ]
 
@@ -347,7 +349,6 @@ def make_contract_curve_zj(total_user_mwh, ratio, month):
 # 五、山东配置（24 点 TOU + 深谷 + 直线典型曲线）
 # =====================================================================
 
-# 直线典型曲线：24 个点均为 1/24
 SD_TYPICAL_24 = np.full(24, 1.0 / 24.0, dtype=float)
 
 SD_TOU_COL_A = [  # 1-2, 12 月
@@ -396,7 +397,6 @@ SD_TOU_COL_E = [  # 9-11 月
 ]
 
 def get_tou_sd_by_month(month: int):
-    """山东：返回对应月份的 24 点 TOU（含：尖峰、峰、平、谷、深谷）"""
     if month in [1, 2, 12]:
         return SD_TOU_COL_A
     elif month in [3, 4, 5]:
@@ -409,9 +409,6 @@ def get_tou_sd_by_month(month: int):
         return SD_TOU_COL_E
 
 def split_load_by_tou_sd(month, 尖峰电量, 峰电量, 平电量, 谷电量, 深谷电量):
-    """
-    山东：根据 24 点 TOU 把尖峰/峰/平/谷/深谷月电量拆成 24 点曲线（MWh）
-    """
     tags = get_tou_sd_by_month(month)
     cnt_尖峰 = tags.count("尖峰")
     cnt_峰 = tags.count("峰")
@@ -436,7 +433,6 @@ def split_load_by_tou_sd(month, 尖峰电量, 峰电量, 平电量, 谷电量, �
     return np.array(curve, dtype=float)
 
 def make_contract_curve_sd(total_user_mwh, ratio):
-    """山东：中长期曲线 = 总电量 × 比例 × 直线典型曲线"""
     return total_user_mwh * ratio * SD_TYPICAL_24
 
 # =====================================================================
@@ -464,7 +460,7 @@ def calc_daytime_ratio(user_curve):
     return day_energy / total
 
 # =====================================================================
-# 七、通用成本计算函数（支持 24 或 48 点，单位：MWh & 元/MWh）
+# 七、通用成本计算函数
 # =====================================================================
 
 def calc_cost(user_curve,
@@ -472,11 +468,6 @@ def calc_cost(user_curve,
               long_price_curve,
               spot_price_curve,
               allocation_price=None):
-    """
-    user_curve, contract_curve: MWh 曲线
-    long_price_curve, spot_price_curve: 元/MWh 曲线
-    allocation_price: 分摊价（元/MWh），如为 None 则不计分摊
-    """
     n = len(user_curve)
     if not (len(contract_curve) == len(long_price_curve) == len(spot_price_curve) == n):
         raise ValueError(
@@ -491,7 +482,7 @@ def calc_cost(user_curve,
     base_total_cost = long_cost + spot_cost
 
     total_mwh = float(user_curve.sum())
-    base_avg = base_total_cost / max(total_mwh, 1e-9)  # 元/MWh
+    base_avg = base_total_cost / max(total_mwh, 1e-9)
 
     allocation_cost = 0.0
     if allocation_price is not None:
@@ -575,7 +566,7 @@ if province in ["安徽", "福建", "山东"]:
                 spot_curve_24 = arr
 
     elif spot_mode_24 == "上传 Excel 模板(24 点)":
-        st.caption("上传包含 24 个现货价格的 Excel 文件（可在一行或一列，程序按顺序读取前 24 个数字）。")
+        st.caption("上传包含 24 个现货价格的 Excel 文件（可在一行或一列，程序按顺序读取前 24 个数字，自动忽略表头和空格）。")
         uploaded_file = st.file_uploader(
             "上传 Excel 文件（.xlsx / .xls）",
             type=["xlsx", "xls"],
@@ -634,7 +625,7 @@ else:
                 spot_curve_48 = arr
 
     elif spot_mode_48 == "上传 Excel 模板(48 点)":
-        st.caption("上传包含 48 个现货价格的 Excel 文件（可在一行或一列，程序按顺序读取前 48 个数字）。")
+        st.caption("上传包含 48 个现货价格的 Excel 文件（可在一行或一列，程序按顺序读取前 48 个数字，自动忽略表头和空格）。")
         uploaded_file = st.file_uploader(
             "上传 Excel 文件（.xlsx / .xls）",
             type=["xlsx", "xls"],
@@ -839,6 +830,7 @@ elif province == "浙江":
             f"最终平均购电成本 = **{res['final_avg']:.4f} 元/MWh**"
         )
 
+    time_index_48 = [f"{h:02d}:{m:02d}" for h in range(24) for m in (0, 30)]
     with st.expander("展开查看成本明细（浙江）"):
         ratio_real = contract_curve.sum() / max(user_curve.sum(), 1e-9)
         st.write(f"- 总用电量：{res['total_mwh']:.4f} MWh")
@@ -850,7 +842,6 @@ elif province == "浙江":
             st.write(f"- 分摊成本：{res['allocation_cost']:,.4f} 元")
         st.write(f"- 最终总购电成本：{res['final_total_cost']:,.4f} 元")
 
-    time_index_48 = [f"{h:02d}:{m:02d}" for h in range(24) for m in (0, 30)]
     df = pd.DataFrame({
         "用户用电(MWh)": user_curve,
         "中长期(MWh)": contract_curve,
