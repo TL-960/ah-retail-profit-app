@@ -3,467 +3,934 @@ import numpy as np
 import pandas as pd
 
 # =====================================================================
-# 固定数据：安徽 2025 火电基准曲线 —— 先按占比再用于中长期分配
+# 工具函数：解析粘贴文本 / Excel 为曲线
 # =====================================================================
-FIRE_CURVE = np.array([
-    77.683, 90.015, 90.380, 88.920, 91.016, 90.825,
-    81.438, 70.063, 65.534, 48.805, 51.304, 51.038,
-    51.064, 50.161, 49.342, 64.623, 83.712, 82.966,
-    78.767, 72.749, 67.500, 69.336, 68.299, 72.468
+
+def parse_numbers_from_text(raw: str, expected_len: int):
+    """
+    从文本中解析 expected_len 个数字，分隔符支持：逗号（中英文）、空格、换行、Tab。
+    数字不足或多于 expected_len 时，返回 None。
+    """
+    if not raw:
+        return None
+    # 统一分隔符
+    for sep in ["，", ",", "\n", "\t", " "]:
+        raw = raw.replace(sep, " ")
+    parts = [p for p in raw.split(" ") if p.strip() != ""]
+    if len(parts) != expected_len:
+        return None
+    try:
+        arr = np.array([float(x) for x in parts], dtype=float)
+    except Exception:
+        return None
+    return arr
+
+
+def load_curve_from_excel(uploaded_file, expected_len: int):
+    """
+    从上传的 Excel 中读出 expected_len 个数字：
+    - 不设表头，直接读取所有单元格，按行展平后取前 expected_len 个非 NaN 值。
+    - 如果有效数字数量 < expected_len，返回 None。
+    """
+    try:
+        df = pd.read_excel(uploaded_file, header=None)
+        values = df.values.flatten()
+        nums = [float(x) for x in values if pd.notna(x)]
+        if len(nums) < expected_len:
+            return None
+        arr = np.array(nums[:expected_len], dtype=float)
+        return arr
+    except Exception:
+        return None
+
+
+# =====================================================================
+# 一、各省默认现货价格曲线（单位：元/MWh）
+# =====================================================================
+
+# 安徽默认现货（24 点）
+DEFAULT_SPOT_AH_24 = np.array([
+    370.10, 363.18, 360.90, 353.45, 351.18, 360.30,
+    363.12, 335.49, 259.44, 215.67, 190.45, 168.96,
+    155.90, 171.09, 202.53, 259.66, 334.17, 370.44,
+    376.52, 374.20, 372.50, 370.44, 358.88, 364.50
 ], dtype=float)
-FIRE_CURVE = FIRE_CURVE / FIRE_CURVE.sum()   # → 转成占比，用来分配 85% 中长期电量
+
+# 福建默认现货（24 点）
+DEFAULT_SPOT_FJ_24 = np.array([
+    348.5, 290.1, 286.9, 250.4, 232.2, 262.7,
+    273.8, 223.8, 222.9, 221.8, 227.2, 198.9,
+    189.3, 227.2, 234.6, 217.7, 282.1, 277.3,
+    305.8, 289.7, 308.4, 293.2, 313.4, 269.7
+], dtype=float)
+
+# 山东默认现货（24 点）
+DEFAULT_SPOT_SD_24 = np.array([
+    372.0818179, 359.8755787, 346.7290448, 334.8613549,
+    334.2911806, 346.5936451, 330.3188873, 269.2929738,
+    173.6974105, 109.1121883, 101.6097778, 97.14061574,
+    82.14963426, 97.63985957, 145.7927222, 222.9569938,
+    353.8797176, 444.7974090, 462.9419846, 454.2064398,
+    447.0688040, 437.3273086, 411.8231775, 397.8648179
+], dtype=float)
+
+# 浙江默认现货（48 点半小时）
+DEFAULT_SPOT_ZJ_48 = np.array([
+    343.8865895, 343.1267009, 341.6607349, 339.9209611, 342.4790429,
+    332.0358448, 325.7966506, 318.5811972, 313.5679028, 314.1470074,
+    322.1215062, 329.2280105, 333.2762108, 322.9830182, 324.00665,
+    315.3226985, 289.0344769, 280.8211361, 278.5530503, 273.5722367,
+    278.5313244, 261.2193796, 297.6305716, 262.4512549, 289.5421617,
+    292.8177108, 250.8009593, 267.6961873, 281.3856707, 301.184104,
+    304.5998099, 312.1248272, 331.5506664, 330.8062244, 338.4700025,
+    341.9855059, 344.5440772, 341.1427522, 341.730216, 339.1469247,
+    343.3799648, 348.7415256, 342.207491, 331.0865154, 337.1445605,
+    350.0255731, 348.4160281, 333.8894145
+], dtype=float)
 
 # =====================================================================
-# 安徽尖峰平谷时段定义
+# 二、安徽配置（24 点 TOU + 用户曲线分配中长期）
 # =====================================================================
-TOU_TABLE = {
-    1:  ["谷","谷","谷","谷","谷","谷","谷","谷","平","平","平","平","平","平","平","峰","峰","峰","峰","峰","峰","峰","峰","谷"],
-    2:  ["谷","谷","谷","谷","谷","谷","峰","峰","平","平","平","平","谷","谷","平","平","平","峰","峰","峰","峰","峰","峰","谷"],
-    3:  ["谷","谷","谷","谷","谷","谷","峰","峰","平","平","平","平","谷","谷","平","平","平","峰","峰","峰","峰","峰","峰","谷"],
-    4:  ["谷","谷","谷","谷","谷","谷","峰","峰","平","平","平","平","谷","谷","平","平","平","峰","峰","峰","峰","峰","峰","谷"],
-    5:  ["谷","谷","谷","谷","谷","谷","峰","峰","平","平","平","平","谷","谷","平","平","平","峰","峰","峰","峰","峰","峰","谷"],
-    6:  ["谷","谷","谷","谷","谷","谷","峰","峰","平","平","平","平","谷","谷","平","平","平","峰","峰","峰","峰","峰","峰","谷"],
-    7:  ["谷","谷","谷","谷","谷","谷","谷","谷","谷","平","平","平","平","平","平","平","峰","峰","峰","峰","峰","峰","峰","峰"],
-    8:  ["谷","谷","谷","谷","谷","谷","谷","谷","谷","平","平","平","平","平","平","平","峰","峰","峰","峰","峰","峰","峰","峰"],
-    9:  ["谷","谷","谷","谷","谷","谷","谷","谷","谷","平","平","平","平","平","平","平","峰","峰","峰","峰","峰","峰","峰","峰"],
-    10: ["谷","谷","谷","谷","谷","谷","峰","峰","平","平","平","平","谷","谷","平","平","平","峰","峰","峰","峰","峰","峰","谷"],
-    11: ["谷","谷","谷","谷","谷","谷","峰","峰","平","平","平","平","谷","谷","平","平","平","峰","峰","峰","峰","峰","峰","谷"],
-    12: ["谷","谷","谷","谷","谷","谷","谷","谷","平","平","平","平","平","平","平","峰","峰","峰","尖","尖","尖","峰","峰","谷"],
+
+# 冬季（1 月、12 月）
+WINTER_TOU_AH = [
+    "谷","谷","谷","谷","谷","谷",   # 0-5
+    "平","平","平","平","平","平",   # 6-11
+    "谷","谷",                       # 12-13
+    "平",                            # 14
+    "峰","峰","峰","峰","峰","峰","峰","峰",  # 15-22
+    "谷"                             # 23
+]
+
+# 春秋季（2-6 月、10-11 月）
+SPRING_AUTUMN_TOU_AH = [
+    "谷","谷","谷","谷","谷","谷",       # 0-5
+    "峰","峰",                           # 6-7
+    "平","平","平",                      # 8-10
+    "谷","谷","谷",                      # 11-13
+    "平","平",                           # 14-15
+    "峰","峰","峰","峰","峰","峰",       # 16-21
+    "平",                                # 22
+    "谷"                                 # 23
+]
+
+# 夏季（7-9 月）
+SUMMER_TOU_AH = [
+    "平","平",                            # 0-1
+    "谷","谷","谷","谷","谷","谷","谷",    # 2-8
+    "平","平",                            # 9-10
+    "谷","谷",                            # 11-12
+    "平","平","平",                       # 13-15
+    "峰","峰","峰","峰","峰","峰","峰","峰"  # 16-23
+]
+
+TOU_TABLE_AH = {
+    1: WINTER_TOU_AH,
+    2: SPRING_AUTUMN_TOU_AH,
+    3: SPRING_AUTUMN_TOU_AH,
+    4: SPRING_AUTUMN_TOU_AH,
+    5: SPRING_AUTUMN_TOU_AH,
+    6: SPRING_AUTUMN_TOU_AH,
+    7: SUMMER_TOU_AH,
+    8: SUMMER_TOU_AH,
+    9: SUMMER_TOU_AH,
+    10: SPRING_AUTUMN_TOU_AH,
+    11: SPRING_AUTUMN_TOU_AH,
+    12: WINTER_TOU_AH,
 }
-# =====================================================================
-# 通用工具函数
-# =====================================================================
-def make_curve(value_or_list, default_val=0.0):
-    """
-    把单值或列表统一转换成 24 点曲线（numpy array）
-    """
-    if value_or_list is None:
-        return np.array([default_val] * 24, dtype=float)
-    if isinstance(value_or_list, (int, float)):
-        return np.array([float(value_or_list)] * 24, dtype=float)
-    if isinstance(value_or_list, (list, tuple, np.ndarray)) and len(value_or_list) == 24:
-        return np.array(value_or_list, dtype=float)
-    return np.array([default_val] * 24, dtype=float)
 
+def split_load_by_tou_ah(month, 尖, 峰, 平, 谷):
+    tags = TOU_TABLE_AH[month]
+    cnt_尖 = tags.count("尖")
+    cnt_峰 = tags.count("峰")
+    cnt_平 = tags.count("平")
+    cnt_谷 = tags.count("谷")
 
-def split_load_by_tou(month,尖,峰,平,谷):
-    """
-    根据月份，把尖/峰/平/谷月电量平均拆分到 24 个小时
-    返回：长度 24 的用户用电曲线（MWh）
-    """
-    table = TOU_TABLE[month]
-    count_尖 = table.count("尖") if "尖" in table else 0
-    count_峰 = table.count("峰")
-    count_平 = table.count("平")
-    count_谷 = table.count("谷")
-
-    arr = []
-    for t in table:
-        if t == "尖" and count_尖 > 0:
-            arr.append(尖 / count_尖 if count_尖 > 0 else 0.0)
-        elif t == "峰":
-            arr.append(峰 / count_峰 if count_峰 > 0 else 0.0)
-        elif t == "平":
-            arr.append(平 / count_平 if count_平 > 0 else 0.0)
-        elif t == "谷":
-            arr.append(谷 / count_谷 if count_谷 > 0 else 0.0)
+    curve = []
+    for tag in tags:
+        if tag == "尖":
+            curve.append(尖 / cnt_尖 if cnt_尖 > 0 else 0.0)
+        elif tag == "峰":
+            curve.append(峰 / cnt_峰 if cnt_峰 > 0 else 0.0)
+        elif tag == "平":
+            curve.append(平 / cnt_平 if cnt_平 > 0 else 0.0)
+        elif tag == "谷":
+            curve.append(谷 / cnt_谷 if cnt_谷 > 0 else 0.0)
         else:
-            arr.append(0.0)
-    return np.array(arr, dtype=float)
+            curve.append(0.0)
+    return np.array(curve, dtype=float)
 
-
-def make_contract_curve(user_curve, fire_curve):
-    """
-    中长期电量 = 总用电量 * 85% * 火电曲线占比
-    """
-    total_user = user_curve.sum()
-    return total_user * 0.85 * fire_curve
-
-
-def calc_cost(user_curve, contract_curve, long_curve_price, spot_curve):
-    """
-    购电成本 = 中长期成本 + 偏差成本（现货）
-    long_curve_price: 24 点中长期结算单价曲线（元/kWh）
-    spot_curve: 24 点现货电价曲线（元/kWh）
-    """
-    dev = user_curve - contract_curve   # 偏差电量（正：在现货买；负：在现货卖）
-    long_cost = np.sum(contract_curve * long_curve_price)
-    spot_cost = np.sum(dev * spot_curve)
-    total_cost = long_cost + spot_cost
-    avg_cost = total_cost / max(user_curve.sum(), 1e-9)
-    return total_cost, avg_cost, dev
-
+def make_contract_curve_ah(user_curve, ratio):
+    return user_curve * ratio
 
 # =====================================================================
-# Streamlit 页面配置
+# 三、福建配置（24 点 TOU + 第一曲线 + 谷电比 + 分摊价）
 # =====================================================================
-st.set_page_config(page_title="安徽电力零售收益模拟器", layout="wide")
-st.title("⚡ 安徽电力零售收益模拟器（升级成本精算版）")
+
+TOU_FJ_NON_SUMMER = [
+    "谷","谷","谷","谷","谷","谷","谷","谷",  # 0-7
+    "平","平",                                # 8-9
+    "峰","峰",                                # 10-11
+    "平","平","平",                           # 12-14
+    "峰","峰","峰","峰","峰",                  # 15-19
+    "平",                                     # 20
+    "峰",                                     # 21
+    "平","平"                                 # 22-23
+]
+
+TOU_FJ_SUMMER = [
+    "谷","谷","谷","谷","谷","谷","谷","谷",   # 0-7
+    "平","平",                                 # 8-9
+    "峰","尖",                                 # 10-11
+    "平","平","平",                            # 12-14
+    "峰","峰","尖","峰","峰",                  # 15-19
+    "平",                                      # 20
+    "峰",                                      # 21
+    "平","平"                                  # 22-23
+]
+
+TOU_TABLE_FJ = {
+    m: (TOU_FJ_SUMMER if m in [7, 8, 9] else TOU_FJ_NON_SUMMER)
+    for m in range(1, 13)
+}
+
+def split_load_by_tou_fj(month, 尖, 峰, 平, 谷):
+    tags = TOU_TABLE_FJ[month]
+    cnt_尖 = tags.count("尖")
+    cnt_峰 = tags.count("峰")
+    cnt_平 = tags.count("平")
+    cnt_谷 = tags.count("谷")
+
+    curve = []
+    for tag in tags:
+        if tag == "尖":
+            curve.append(尖 / cnt_尖 if cnt_尖 > 0 else 0.0)
+        elif tag == "峰":
+            curve.append(峰 / cnt_峰 if cnt_峰 > 0 else 0.0)
+        elif tag == "平":
+            curve.append(平 / cnt_平 if cnt_平 > 0 else 0.0)
+        elif tag == "谷":
+            curve.append(谷 / cnt_谷 if cnt_谷 > 0 else 0.0)
+        else:
+            curve.append(0.0)
+    return np.array(curve, dtype=float)
+
+FIRST_CURVE_FJ_RAW = np.array([
+    4.28, 4.24, 4.17, 4.12, 4.08, 4.05,
+    4.06, 4.13, 4.30, 4.36, 4.25, 4.04,
+    4.00, 4.22, 4.30, 4.28, 4.32, 4.18,
+    4.13, 4.10, 4.13, 4.05, 4.11, 4.11
+], dtype=float)
+FIRST_CURVE_FJ = FIRST_CURVE_FJ_RAW / FIRST_CURVE_FJ_RAW.sum()
+
+def make_contract_curve_fj(total_user_mwh, ratio):
+    return total_user_mwh * ratio * FIRST_CURVE_FJ
+
+def calc_valley_ratio_fj(user_curve, month):
+    tags = TOU_TABLE_FJ[month]
+    valley_hours = [i for i, t in enumerate(tags) if t == "谷"]
+    valley_energy = user_curve[valley_hours].sum()
+    total_energy = user_curve.sum()
+    if total_energy <= 0:
+        return 0.0
+    return valley_energy / total_energy
 
 # =====================================================================
-# 一、成本精算模块
+# 四、浙江配置（典型负荷曲线 48 点 + 48 点 TOU）
 # =====================================================================
-st.header("一、成本精算模块（85% 中长期 + 15% 现货偏差）")
 
-# ---- 月份 & 中长期基准价 ----
-row1_col1, row1_col2 = st.columns([1, 1])
-with row1_col1:
-    month = st.selectbox("选择月份（用于尖峰平谷拆分）", list(range(1, 13)), index=0)
-with row1_col2:
-    P_long = st.number_input(
-        "中长期基准价 P_long (元/kWh)",
-        0.0000, 3.0000, 0.6500, step=0.0001, format="%.4f"
+# 典型负荷：1–11 月（48 点，占比）
+ZJ_LOAD_JAN_NOV_48_RAW = np.array([
+    0.019318, 0.018629, 0.018042, 0.017565,
+    0.017173, 0.017173, 0.016639, 0.016467,
+    0.016377, 0.016375, 0.016475, 0.016867,
+    0.017441, 0.018507, 0.019913, 0.021629,
+    0.022693, 0.023260, 0.023275, 0.023038,
+    0.022811, 0.022578, 0.021742, 0.020980,
+    0.020556, 0.021017, 0.021042, 0.020744,
+    0.020779, 0.020978, 0.021324, 0.021909,
+    0.022624, 0.023240, 0.023058, 0.023476,
+    0.023777, 0.023864, 0.023828, 0.023771,
+    0.023562, 0.023486, 0.023155, 0.022705,
+    0.022250, 0.022199, 0.021385, 0.020304
+], dtype=float)
+ZJ_LOAD_JAN_NOV_48 = ZJ_LOAD_JAN_NOV_48_RAW / ZJ_LOAD_JAN_NOV_48_RAW.sum()
+
+# 典型负荷：12 月（48 点，占比）
+ZJ_LOAD_DEC_48_RAW = np.array([
+    0.018877, 0.018642, 0.018193, 0.017830,
+    0.017526, 0.017526, 0.016997, 0.016788,
+    0.016662, 0.016574, 0.016659, 0.017049,
+    0.017632, 0.018791, 0.020198, 0.021801,
+    0.022728, 0.023048, 0.023030, 0.022745,
+    0.022535, 0.022309, 0.021476, 0.021252,
+    0.020929, 0.021680, 0.021775, 0.021509,
+    0.021629, 0.021888, 0.022222, 0.022588,
+    0.023137, 0.023523, 0.023145, 0.023381,
+    0.023409, 0.023412, 0.023228, 0.023034,
+    0.022726, 0.022589, 0.022240, 0.021806,
+    0.021346, 0.021367, 0.020747, 0.019937
+], dtype=float)
+ZJ_LOAD_DEC_48 = ZJ_LOAD_DEC_48_RAW / ZJ_LOAD_DEC_48_RAW.sum()
+
+# 春秋季 TOU（2–6 月、9–11 月，48 点）
+TOU_ZJ_SPRING_AUTUMN_48 = [
+    # 00:00–07:00 → 谷（14 半小时：0-13）
+    "谷","谷","谷","谷","谷","谷","谷",
+    "谷","谷","谷","谷","谷","谷","谷",
+    # 07:00–11:00 → 平（14-21）
+    "平","平","平","平","平","平","平","平",
+    # 11:00–14:00 → 谷（22-27）
+    "谷","谷","谷","谷","谷","谷",
+    # 14:00–16:00 → 平（28-31）
+    "平","平","平","平",
+    # 16:00–23:00 → 峰（32-45）
+    "峰","峰","峰","峰","峰","峰","峰",
+    "峰","峰","峰","峰","峰","峰","峰",
+    # 23:00–24:00 → 平（46-47）
+    "平","平"
+]
+
+# 夏冬季 TOU（1、7、8、12 月，48 点）
+TOU_ZJ_SUMMER_WINTER_48 = [
+    # 00:00–07:00 → 谷
+    "谷","谷","谷","谷","谷","谷","谷",
+    "谷","谷","谷","谷","谷","谷","谷",
+    # 07:00–11:00 → 平
+    "平","平","平","平","平","平","平","平",
+    # 11:00–14:00 → 谷
+    "谷","谷","谷","谷","谷","谷",
+    # 14:00–16:00 → 平
+    "平","平","平","平",
+    # 16:00–18:00 → 峰
+    "峰","峰","峰","峰",
+    # 18:00–22:00 → 尖
+    "尖","尖","尖","尖","尖","尖","尖","尖",
+    # 22:00–23:00 → 峰
+    "峰","峰",
+    # 23:00–24:00 → 平
+    "平","平"
+]
+
+def get_tou_zj_by_month(month: int):
+    if month in [2, 3, 4, 5, 6, 9, 10, 11]:
+        return TOU_ZJ_SPRING_AUTUMN_48
+    else:  # 1, 7, 8, 12
+        return TOU_ZJ_SUMMER_WINTER_48
+
+def split_load_by_tou_zj(month, 尖, 峰, 平, 谷):
+    tags = get_tou_zj_by_month(month)
+    cnt_尖 = tags.count("尖")
+    cnt_峰 = tags.count("峰")
+    cnt_平 = tags.count("平")
+    cnt_谷 = tags.count("谷")
+
+    curve = []
+    for tag in tags:
+        if tag == "尖":
+            curve.append(尖 / cnt_尖 if cnt_尖 > 0 else 0.0)
+        elif tag == "峰":
+            curve.append(峰 / cnt_峰 if cnt_峰 > 0 else 0.0)
+        elif tag == "平":
+            curve.append(平 / cnt_平 if cnt_平 > 0 else 0.0)
+        elif tag == "谷":
+            curve.append(谷 / cnt_谷 if cnt_谷 > 0 else 0.0)
+        else:
+            curve.append(0.0)
+    return np.array(curve, dtype=float)
+
+def make_contract_curve_zj(total_user_mwh, ratio, month):
+    shape = ZJ_LOAD_DEC_48 if month == 12 else ZJ_LOAD_JAN_NOV_48
+    return total_user_mwh * ratio * shape
+
+# =====================================================================
+# 五、山东配置（24 点 TOU + 深谷 + 直线典型曲线）
+# =====================================================================
+
+# 直线典型曲线：24 个点均为 1/24
+SD_TYPICAL_24 = np.full(24, 1.0 / 24.0, dtype=float)
+
+SD_TOU_COL_A = [  # 1-2, 12 月
+    "平","平","谷","谷","谷","谷","平",
+    "峰","峰","平","谷","深谷","深谷","深谷",
+    "谷","平",
+    "尖峰","尖峰","尖峰",
+    "峰","峰",
+    "平","平","平"
+]
+
+SD_TOU_COL_B = [  # 3-5 月
+    "平","平","平","平","平","平","平",
+    "平","平","平","谷","深谷","深谷","深谷",
+    "谷","平","平",
+    "尖峰","尖峰","尖峰",
+    "峰","峰",
+    "平","平"
+]
+
+SD_TOU_COL_C = [  # 6 月
+    "平","平","平","平","平","平","平",
+    "谷","谷","谷","谷","谷","平","平",
+    "平","平","峰",
+    "尖峰","尖峰","尖峰",
+    "尖峰","尖峰",
+    "峰","平"
+]
+
+SD_TOU_COL_D = [  # 7-8 月
+    "平","谷","谷","谷","谷","谷",
+    "平","平","平","平","平","平","平",
+    "平","平","平",
+    "峰","尖峰","尖峰",
+    "尖峰","尖峰",
+    "尖峰","峰","平"
+]
+
+SD_TOU_COL_E = [  # 9-11 月
+    "平","平","平","平","平","平","平",
+    "平","平","平","谷","深谷","深谷","深谷",
+    "谷","平",
+    "峰","尖峰","尖峰",
+    "峰","峰",
+    "平","平","平"
+]
+
+def get_tou_sd_by_month(month: int):
+    """山东：返回对应月份的 24 点 TOU（含：尖峰、峰、平、谷、深谷）"""
+    if month in [1, 2, 12]:
+        return SD_TOU_COL_A
+    elif month in [3, 4, 5]:
+        return SD_TOU_COL_B
+    elif month == 6:
+        return SD_TOU_COL_C
+    elif month in [7, 8]:
+        return SD_TOU_COL_D
+    else:  # 9-11
+        return SD_TOU_COL_E
+
+def split_load_by_tou_sd(month, 尖峰电量, 峰电量, 平电量, 谷电量, 深谷电量):
+    """
+    山东：根据 24 点 TOU 把尖峰/峰/平/谷/深谷月电量拆成 24 点曲线（MWh）
+    """
+    tags = get_tou_sd_by_month(month)
+    cnt_尖峰 = tags.count("尖峰")
+    cnt_峰 = tags.count("峰")
+    cnt_平 = tags.count("平")
+    cnt_谷 = tags.count("谷")
+    cnt_深谷 = tags.count("深谷")
+
+    curve = []
+    for tag in tags:
+        if tag == "尖峰":
+            curve.append(尖峰电量 / cnt_尖峰 if cnt_尖峰 > 0 else 0.0)
+        elif tag == "峰":
+            curve.append(峰电量 / cnt_峰 if cnt_峰 > 0 else 0.0)
+        elif tag == "平":
+            curve.append(平电量 / cnt_平 if cnt_平 > 0 else 0.0)
+        elif tag == "谷":
+            curve.append(谷电量 / cnt_谷 if cnt_谷 > 0 else 0.0)
+        elif tag == "深谷":
+            curve.append(深谷电量 / cnt_深谷 if cnt_深谷 > 0 else 0.0)
+        else:
+            curve.append(0.0)
+    return np.array(curve, dtype=float)
+
+def make_contract_curve_sd(total_user_mwh, ratio):
+    """山东：中长期曲线 = 总电量 × 比例 × 直线典型曲线"""
+    return total_user_mwh * ratio * SD_TYPICAL_24
+
+# =====================================================================
+# 六、通用白天用电比例计算（9:00–15:00）
+# =====================================================================
+
+def calc_daytime_ratio(user_curve):
+    """
+    白天用电比例（9:00–15:00）
+    24 点：取 index 9~14 共 6 点
+    48 点：取 index 18~29 共 12 半小时点
+    """
+    n = len(user_curve)
+    total = float(np.sum(user_curve))
+    if total <= 0:
+        return 0.0
+
+    if n == 24:
+        day_energy = float(np.sum(user_curve[9:15]))
+    elif n == 48:
+        day_energy = float(np.sum(user_curve[18:30]))
+    else:
+        raise ValueError(f"不支持的曲线点数：{n}")
+
+    return day_energy / total
+
+# =====================================================================
+# 七、通用成本计算函数（支持 24 或 48 点，单位：MWh & 元/MWh）
+# =====================================================================
+
+def calc_cost(user_curve,
+              contract_curve,
+              long_price_curve,
+              spot_price_curve,
+              allocation_price=None):
+    """
+    user_curve, contract_curve: MWh 曲线
+    long_price_curve, spot_price_curve: 元/MWh 曲线
+    allocation_price: 分摊价（元/MWh），如为 None 则不计分摊
+    """
+    n = len(user_curve)
+    if not (len(contract_curve) == len(long_price_curve) == len(spot_price_curve) == n):
+        raise ValueError(
+            f"曲线长度不一致：user={len(user_curve)}, contract={len(contract_curve)}, "
+            f"long_price={len(long_price_curve)}, spot_price={len(spot_price_curve)}，应全部相等。"
+        )
+
+    dev = user_curve - contract_curve  # MWh
+
+    long_cost = float(np.sum(contract_curve * long_price_curve))
+    spot_cost = float(np.sum(dev * spot_price_curve))
+    base_total_cost = long_cost + spot_cost
+
+    total_mwh = float(user_curve.sum())
+    base_avg = base_total_cost / max(total_mwh, 1e-9)  # 元/MWh
+
+    allocation_cost = 0.0
+    if allocation_price is not None:
+        allocation_cost = total_mwh * allocation_price
+        final_total_cost = base_total_cost + allocation_cost
+        final_avg = base_avg + allocation_price
+    else:
+        final_total_cost = base_total_cost
+        final_avg = base_avg
+
+    return {
+        "dev_curve": dev,
+        "long_cost": long_cost,
+        "spot_cost": spot_cost,
+        "base_total_cost": base_total_cost,
+        "base_avg": base_avg,
+        "allocation_cost": allocation_cost,
+        "final_total_cost": final_total_cost,
+        "final_avg": final_avg,
+        "total_mwh": total_mwh,
+    }
+
+# =====================================================================
+# 八、Streamlit UI
+# =====================================================================
+
+st.set_page_config(page_title="多省电力零售成本测算（皖/闽/浙/鲁）", layout="wide")
+st.title("⚡ 多省电力零售成本测算")
+
+province = st.selectbox("选择省份", ["安徽", "福建", "浙江", "山东"], index=0)
+
+# ---------- 现货价格输入（按省份分支） ----------
+if province in ["安徽", "福建", "山东"]:
+    st.subheader("一、日前现货价格曲线（24 点整点，单位：元/MWh）")
+
+    if province == "安徽":
+        base_spot = DEFAULT_SPOT_AH_24
+    elif province == "福建":
+        base_spot = DEFAULT_SPOT_FJ_24
+    else:  # 山东
+        base_spot = DEFAULT_SPOT_SD_24
+
+    spot_mode_24 = st.radio(
+        "现货价格输入方式",
+        ["使用默认曲线", "手动逐点输入", "粘贴 24 个数字", "上传 Excel 模板(24 点)"],
+        index=0,
+        key=f"spot24_mode_{province}"
     )
 
-# ---- 尖峰平谷 4 个电量 ----
-c1, c2, c3, c4 = st.columns(4)
-with c1:
-   尖 = st.number_input("尖电量 (MWh)", 0.0, 1e9, 0.0)
-with c2:
-   峰 = st.number_input("峰电量 (MWh)", 0.0, 1e9, 0.0)
-with c3:
-   平 = st.number_input("平电量 (MWh)", 0.0, 1e9, 0.0)
-with c4:
-   谷 = st.number_input("谷电量 (MWh)", 0.0, 1e9, 0.0)
+    spot_curve_24 = base_spot.copy()
 
-# ---- 生成用户 24 点用电曲线 ----
-user_curve = split_load_by_tou(month, 尖, 峰, 平, 谷)
-
-# 中长期单价曲线：以火电曲线相对平均值的形状拉伸到 P_long
-rel = FIRE_CURVE / FIRE_CURVE.mean()
-long_curve_price = rel * P_long
-
-# ---- 日前现货价格输入----
-st.subheader("二、日前现货价格曲线（元/kWh）")
-
-use_custom_spot = st.checkbox("手动输入 24 点现货价格（不勾选则使用统一默认值）", value=False)
-
-if use_custom_spot:
-    spot_vals = [0.35] * 24
-    rows = 4
-    cols_per_row = 6
-    for r in range(rows):
-        cols = st.columns(cols_per_row)
-        for c in range(cols_per_row):
-            i = r * cols_per_row + c
-            with cols[c]:
-                spot_vals[i] = st.number_input(
+    if spot_mode_24 == "手动逐点输入":
+        vals = base_spot.copy().tolist()
+        st.caption("按小时逐点输入现货价格（元/MWh）：")
+        for r in range(4):
+            cols = st.columns(6)
+            for c in range(6):
+                i = r * 6 + c
+                vals[i] = cols[c].number_input(
                     f"{i}:00",
-                    0.0000, 5.0000, float(spot_vals[i]),
-                    step=0.0001, format="%.4f", key=f"spot_{i}"
+                    0.0, 10000.0, float(vals[i]),
+                    step=0.0001,
+                    format="%.4f",
+                    key=f"spot24_{province}_{i}"
                 )
-    spot_curve = np.array(spot_vals, dtype=float)
+        spot_curve_24 = np.array(vals, dtype=float)
+
+    elif spot_mode_24 == "粘贴 24 个数字":
+        st.caption("支持以逗号、空格或换行分隔。例如：\n370.1, 363.18, ... 或 370.1 363.18 ...")
+        raw = st.text_area(
+            "在此粘贴 24 个现货价格（元/MWh）",
+            value="",
+            key=f"spot24_paste_{province}",
+            height=120
+        )
+        arr = parse_numbers_from_text(raw, 24)
+        if raw.strip():
+            if arr is None:
+                st.error("解析失败：请确认一共是 24 个数字，且格式正确。当前已回退为默认曲线。")
+            else:
+                spot_curve_24 = arr
+
+    elif spot_mode_24 == "上传 Excel 模板(24 点)":
+        st.caption("上传包含 24 个现货价格的 Excel 文件（可在一行或一列，程序按顺序读取前 24 个数字）。")
+        uploaded_file = st.file_uploader(
+            "上传 Excel 文件（.xlsx / .xls）",
+            type=["xlsx", "xls"],
+            key=f"spot24_excel_{province}"
+        )
+        if uploaded_file is not None:
+            arr = load_curve_from_excel(uploaded_file, 24)
+            if arr is None:
+                st.error("未能从 Excel 中读取到 24 个有效数字，当前已回退为默认曲线。")
+            else:
+                spot_curve_24 = arr
+
 else:
-    # 简单双曲线可以后续再调整，这里先统一值
-    spot_curve = np.array([0.3500] * 24, dtype=float)
+    st.subheader("一、日前现货价格曲线（48 点半小时，单位：元/MWh）")
 
-# ---- 成本计算 ----
-contract_curve = make_contract_curve(user_curve, FIRE_CURVE)
-total_cost, avg_cost, dev_curve = calc_cost(
-    user_curve, contract_curve, long_curve_price, spot_curve
-)
+    spot_mode_48 = st.radio(
+        "现货价格输入方式",
+        ["使用默认曲线", "手动逐点输入", "粘贴 48 个数字", "上传 Excel 模板(48 点)"],
+        index=0,
+        key="spot48_mode"
+    )
 
-st.success(f"📌 当前按输入测算的 **平均购电成本 = {avg_cost:.4f} 元/kWh**")
+    spot_curve_48 = DEFAULT_SPOT_ZJ_48.copy()
 
-# ---- 曲线展示 ----
-st.subheader("三、用户用电 / 中长期 / 偏差曲线（MWh）")
+    if spot_mode_48 == "手动逐点输入":
+        vals = DEFAULT_SPOT_ZJ_48.copy().tolist()
+        st.caption("按半小时逐点输入现货价格（元/MWh）：")
+        for r in range(8):
+            cols = st.columns(6)
+            for c in range(6):
+                i = r * 6 + c
+                hh = i // 2
+                mm = (i % 2) * 30
+                vals[i] = cols[c].number_input(
+                    f"{hh:02d}:{mm:02d}",
+                    0.0, 10000.0, float(vals[i]),
+                    step=0.0001,
+                    format="%.4f",
+                    key=f"spot48_{i}"
+                )
+        spot_curve_48 = np.array(vals, dtype=float)
 
-df_chart = pd.DataFrame({
-    "用户用电(MWh)": user_curve,
-    "中长期合同(MWh)": contract_curve,
-    "偏差电量(MWh)": dev_curve
-}, index=[f"{i}:00" for i in range(24)])
+    elif spot_mode_48 == "粘贴 48 个数字":
+        st.caption("支持以逗号、空格或换行分隔。例如：343.88, 343.12, ... 或 343.88 343.12 ...")
+        raw = st.text_area(
+            "在此粘贴 48 个现货价格（元/MWh）",
+            value="",
+            key="spot48_paste",
+            height=160
+        )
+        arr = parse_numbers_from_text(raw, 48)
+        if raw.strip():
+            if arr is None:
+                st.error("解析失败：请确认一共是 48 个数字，且格式正确。当前已回退为默认曲线。")
+            else:
+                spot_curve_48 = arr
 
-st.line_chart(df_chart)
+    elif spot_mode_48 == "上传 Excel 模板(48 点)":
+        st.caption("上传包含 48 个现货价格的 Excel 文件（可在一行或一列，程序按顺序读取前 48 个数字）。")
+        uploaded_file = st.file_uploader(
+            "上传 Excel 文件（.xlsx / .xls）",
+            type=["xlsx", "xls"],
+            key="spot48_excel"
+        )
+        if uploaded_file is not None:
+            arr = load_curve_from_excel(uploaded_file, 48)
+            if arr is None:
+                st.error("未能从 Excel 中读取到 48 个有效数字，当前已回退为默认曲线。")
+            else:
+                spot_curve_48 = arr
 
 st.divider()
 
 # =====================================================================
-# 二、收益测算模块（K1 / K2 / K3 / 绿电）
+# 安徽模块
 # =====================================================================
-st.header("二、收益测算模块（K1/K2/K3/绿电）")
-st.caption("说明：本模块中“批发购电成本”已自动使用上方测算得到的 avg_cost。")
+if province == "安徽":
+    st.header("二、安徽成本精算模块（24 点）")
 
-# ---- 基础参数（收益模块）----
-b1, b2, b3 = st.columns(3)
-
-with b1:
-    total_power_mwh = st.number_input(
-        "售电总电量 (MWh)",
-        0.0, 1e9,
-        float(user_curve.sum()),  # 默认用成本模块的总用电量
-        step=100.0
-    )
-    # 批发成本 = 上面成本模块测出来的平均成本
-    wholesale_price = avg_cost
-
-with b2:
-    market_avg_price = st.number_input(
-        "市场均价 P_market (元/kWh)",
-        0.0000, 2.0000, 0.7500, step=0.0001, format="%.4f"
-    )
-    p_settle_last_year = st.number_input(
-        "上一年度批发侧结算均价 (元/kWh)",
-        0.0000, 2.0000, 0.7300, step=0.0001, format="%.4f"
-    )
-    p_green_avg = st.number_input(
-        "绿色电力批发均值 (元/kWh)",
-        0.0000, 2.0000, 0.0300, step=0.0001, format="%.4f"
-    )
-
-with b3:
-    k1_ratio = st.slider("K1 比例", 0.0, 1.0, 0.4, 0.05)
-    k2_ratio = st.slider("K2 比例", 0.0, 1.0, 0.4, 0.05)
-    k3_ratio = st.slider("K3 比例", 0.0, 1.0, 0.2, 0.05)
-
-# =====================================================================
-# 收益模块内部工具函数（沿用原来的逻辑）
-# =====================================================================
-def enforce_rules_profit(params: dict):
-    """套餐比例 & K3 分成比例等合规校验"""
-    warnings = []
-    total_ratio = params["k1_ratio"] + params["k2_ratio"] + params["k3_ratio"]
-    if total_ratio > 1:
-        warnings.append(f"套餐比例总和 {total_ratio:.2f} 超过 100%，系统已自动等比例缩放。")
-        scale = 1 / total_ratio
-        for k in ["k1_ratio", "k2_ratio", "k3_ratio"]:
-            params[k] *= scale
-    if params["k3_ratio"] > 0 and params["k3_share_ratio"] < 0.5:
-        warnings.append("套餐三分成比例低于 50%，系统已自动调整为 50%。")
-        params["k3_share_ratio"] = 0.5
-    return params, warnings
-
-
-def calc_profit_detailed(
-    total_power_mwh, wholesale_price,
-    k1_curve, k1_ratio,
-    market_avg_price, k2_float_percent, k2_ratio,
-    k3_input_curve, k3_is_factor, k3_share_ratio, k3_ratio,
-    green_ratio, green_fix_price,
-):
-    """
-    套餐收益测算
-    """
-    total_power_kwh = total_power_mwh * 1000.0
-    if total_power_kwh <= 0:
-        return {}
-
-    w_curve = make_curve(wholesale_price)  # 批发成本曲线（统一价）
-    k1_curve = make_curve(k1_curve)
-    profit_k1 = (k1_curve - w_curve).mean() * k1_ratio * total_power_kwh
-
-    # K2：市场均价 + 浮动价
-    p2_price = market_avg_price * (1 + k2_float_percent)
-    profit_k2 = (p2_price - wholesale_price) * k2_ratio * total_power_kwh
-
-    # K3：价差分成
-    market_curve = make_curve(market_avg_price)
-    if k3_is_factor:
-        base_curve = market_curve * make_curve(k3_input_curve, 1.0)
-    else:
-        base_curve = make_curve(k3_input_curve, market_avg_price)
-
-    # P3T = P基T − (P基T − P售均T) × K分成
-    p3_curve = base_curve - (base_curve - market_curve) * k3_share_ratio
-    profit_k3 = (p3_curve - w_curve).mean() * k3_ratio * total_power_kwh
-
-    # 加权平均零售价（不含绿电）
-    blend_ratio = max(k1_ratio + k2_ratio + k3_ratio, 1e-6)
-    blended_price = (
-        k1_curve.mean() * k1_ratio +
-        p2_price * k2_ratio +
-        p3_curve.mean() * k3_ratio
-    ) / blend_ratio
-
-    # 绿电附加（只用固定价，不再有百分比溢价）
-    green_profit = total_power_kwh * green_ratio * green_fix_price
-
-    total_profit = profit_k1 + profit_k2 + profit_k3 + green_profit
-    unit_profit = total_profit / max(total_power_kwh, 1e-9)
-
-    return {
-        "总收益(元)": round(total_profit, 2),
-        "单位收益(元/kWh)": round(unit_profit, 4),
-        "K1收益(元)": round(profit_k1, 2),
-        "K2收益(元)": round(profit_k2, 2),
-        "K3收益(元)": round(profit_k3, 2),
-        "绿电收益(元)": round(green_profit, 2),
-        "平均零售价(不含绿电)": round(blended_price, 4),
-        "K1平均价(元/kWh)": round(k1_curve.mean(), 4),
-        "K2结算价(元/kWh)": round(p2_price, 4),
-        "K3平均价(元/kWh)": round(p3_curve.mean(), 4),
-    }
-
-
-# =====================================================================
-# K1 固定价套餐
-# =====================================================================
-st.subheader("K1 固定价套餐")
-
-k1_mode = st.radio("K1 输入方式", ["统一固定价", "24 时点曲线"], horizontal=True)
-
-if k1_mode == "统一固定价":
-    k1_flat = st.number_input(
-        "固定电价 P1 (元/kWh)",
-        0.0000, 2.0000, 0.7000, step=0.0001, format="%.4f"
-    )
-    k1_curve = make_curve(k1_flat)
-else:
-    st.markdown("请输入 24 点 K1 电价曲线（元/kWh）：")
-    k1_vals = [0.70] * 24
-    rows = 4
-    cols_per_row = 6
-    for r in range(rows):
-        cols = st.columns(cols_per_row)
-        for c in range(cols_per_row):
-            i = r * cols_per_row + c
-            with cols[c]:
-                k1_vals[i] = st.number_input(
-                    f"K1 {i}:00",
-                    0.0000, 2.0000, float(k1_vals[i]),
-                    step=0.0001, format="%.4f", key=f"k1_{i}"
-                )
-    k1_curve = make_curve(k1_vals)
-
-# =====================================================================
-# K2 市场均价 + 浮动套餐
-# =====================================================================
-st.subheader("K2 市场加浮动套餐")
-
-p_float_input = st.number_input(
-    "K2 浮动价 ΔP (元/kWh，相对市场均价加减)",
-    -1.0000, 1.0000, 0.0000,
-    step=0.0001, format="%.4f"
-)
-p2_price_preview = market_avg_price + p_float_input
-k2_float_percent = p_float_input / market_avg_price if market_avg_price > 0 else 0.0
-st.caption(f"当前 K2 结算电价约为：{p2_price_preview:.4f} 元/kWh，对应浮动比例 {k2_float_percent*100:.2f}%")
-
-diff_ratio = p_float_input / p_settle_last_year * 100 if p_settle_last_year > 0 else 0.0
-if abs(diff_ratio) > 3:
-    st.warning(
-        f"⚠️ 相对上一年度批发侧结算均价 {p_settle_last_year:.4f} 元/kWh，"
-        f"浮动价对应变动 {diff_ratio:.2f}% ，超过 ±3%，按合同需法人代表确认。"
-    )
-
-# =====================================================================
-# K3 价差分成套餐
-# =====================================================================
-st.subheader("K3 价差分成套餐")
-
-k3_mode = st.radio(
-    "K3 基准价形式",
-    ["浮动系数（P基T = P售均 × K浮动）", "统一基准价", "24 点基准价曲线"],
-    horizontal=True,
-)
-
-k3_is_factor = (k3_mode.startswith("浮动系数"))
-
-if k3_is_factor:
-    k3_float = st.number_input(
-        "统一浮动系数 K浮动（例如 1.05 = 上浮 5%）",
-        0.5000, 2.0000, 1.0500,
+    c1, c2, c3 = st.columns(3)
+    month = c1.selectbox("月份（用于 TOU 拆分）", list(range(1, 13)), index=5)
+    P_long = c2.number_input(
+        "中长期合同电价（元/MWh）",
+        0.0, 5000.0, 360.0000,
         step=0.0001, format="%.4f"
     )
-    k3_input_curve = make_curve(k3_float)
-    p_base = market_avg_price * k3_float
-    st.caption(f"当前 K3 基准价 P基T ≈ {p_base:.4f} 元/kWh")
-    if k3_float > 1.05:
-        st.warning("⚠️ K3 浮动系数超过 1.05（上浮 5%），按合同需法人授权确认。")
-else:
-    if k3_mode == "统一基准价":
-        base = st.number_input(
-            "统一基准价 P基 (元/kWh)",
-            0.0000, 3.0000, market_avg_price,
+    ratio = c3.number_input(
+        "中长期比例（0~1）",
+        0.0, 1.0, 0.8800,
+        step=0.0001, format="%.4f"
+    )
+
+    e1, e2, e3, e4 = st.columns(4)
+    尖 = e1.number_input("尖电量 (MWh)", 0.0, 1e9, 0.0, step=0.0001, format="%.4f")
+    峰 = e2.number_input("峰电量 (MWh)", 0.0, 1e9, 3475.1200, step=0.0001, format="%.4f")
+    平 = e3.number_input("平电量 (MWh)", 0.0, 1e9, 1559.3600, step=0.0001, format="%.4f")
+    谷 = e4.number_input("谷电量 (MWh)", 0.0, 1e9, 14809.5200, step=0.0001, format="%.4f")
+
+    user_curve = split_load_by_tou_ah(month, 尖, 峰, 平, 谷)
+    contract_curve = make_contract_curve_ah(user_curve, ratio)
+    long_price_curve = np.full(24, P_long, dtype=float)
+    spot_curve = spot_curve_24
+
+    res = calc_cost(user_curve, contract_curve, long_price_curve, spot_curve)
+
+    day_ratio = calc_daytime_ratio(user_curve)
+    st.write(f"🌞 白天用电占比（9–15 点）：**{day_ratio * 100:.4f}%**")
+
+    st.success(f"📌 安徽：平均购电成本 = **{res['final_avg']:.4f} 元/MWh**")
+
+    with st.expander("展开查看成本明细（安徽）"):
+        ratio_real = contract_curve.sum() / max(user_curve.sum(), 1e-9)
+        st.write(f"- 总用电量：{res['total_mwh']:.4f} MWh")
+        st.write(f"- 实际中长期电量占比：{ratio_real*100:.4f}%")
+        st.write(f"- 中长期成本：{res['long_cost']:,.4f} 元")
+        st.write(f"- 现货偏差成本：{res['spot_cost']:,.4f} 元")
+        st.write(f"- 总购电成本：{res['final_total_cost']:,.4f} 元")
+
+    df = pd.DataFrame({
+        "用户用电(MWh)": user_curve,
+        "中长期(MWh)": contract_curve,
+        "偏差电量(MWh)": res["dev_curve"],
+    }, index=[f"{i}:00" for i in range(24)])
+    st.line_chart(df)
+
+# =====================================================================
+# 福建模块
+# =====================================================================
+elif province == "福建":
+    st.header("二、福建成本精算模块（第一曲线 + 谷电比 + 分摊价，24 点）")
+
+    c1, c2, c3 = st.columns(3)
+    month = c1.selectbox("月份（用于 TOU 拆分）", list(range(1, 13)), index=5)
+    P_long = c2.number_input(
+        "中长期合同电价（元/MWh）",
+        0.0, 5000.0, 360.0000,
+        step=0.0001, format="%.4f"
+    )
+    ratio = c3.number_input(
+        "中长期比例（0~1，例如 0.80）",
+        0.0, 1.0, 0.8000,
+        step=0.0001, format="%.4f"
+    )
+
+    e1, e2, e3, e4 = st.columns(4)
+    尖 = e1.number_input("尖电量 (MWh)", 0.0, 1e9, 0.0, step=0.0001, format="%.4f")
+    峰 = e2.number_input("峰电量 (MWh)", 0.0, 1e9, 0.0, step=0.0001, format="%.4f")
+    平 = e3.number_input("平电量 (MWh)", 0.0, 1e9, 0.0, step=0.0001, format="%.4f")
+    谷 = e4.number_input("谷电量 (MWh)", 0.0, 1e9, 0.0, step=0.0001, format="%.4f")
+
+    user_curve = split_load_by_tou_fj(month, 尖, 峰, 平, 谷)
+    total_user_mwh = float(user_curve.sum())
+
+    contract_curve = make_contract_curve_fj(total_user_mwh, ratio)
+    long_price_curve = np.full(24, P_long, dtype=float)
+    spot_curve = spot_curve_24
+
+    use_allocation = st.checkbox("启用分摊价格（元/MWh）", value=False)
+    allocation_price = None
+    if use_allocation:
+        allocation_price = st.number_input(
+            "分摊单价（元/MWh）",
+            0.0, 1000.0, 10.0000,
             step=0.0001, format="%.4f"
         )
-        k3_input_curve = make_curve(base)
+
+    res = calc_cost(user_curve, contract_curve, long_price_curve,
+                    spot_curve, allocation_price)
+
+    day_ratio = calc_daytime_ratio(user_curve)
+    st.write(f"🌞 白天用电占比（9–15 点）：**{day_ratio * 100:.4f}%**")
+
+    valley_ratio = calc_valley_ratio_fj(user_curve, month)
+
+    if allocation_price is None:
+        st.success(
+            f"📌 福建：基础平均购电成本（不含分摊） = **{res['base_avg']:.4f} 元/MWh**；"
+            f"🌙 谷电比 = **{valley_ratio*100:.4f}%**"
+        )
     else:
-        st.markdown("请输入 24 点 K3 基准价曲线 P基T（元/kWh）：")
-        k3_vals = [market_avg_price] * 24
-        rows = 4
-        cols_per_row = 6
-        for r in range(rows):
-            cols = st.columns(cols_per_row)
-            for c in range(cols_per_row):
-                i = r * cols_per_row + c
-                with cols[c]:
-                    k3_vals[i] = st.number_input(
-                        f"K3 {i}:00",
-                        0.0000, 3.0000, float(k3_vals[i]),
-                        step=0.0001, format="%.4f", key=f"k3_{i}"
-                    )
-        k3_input_curve = make_curve(k3_vals)
+        st.success(
+            f"📌 福建：基础平均购电成本 = **{res['base_avg']:.4f} 元/MWh**；"
+            f"分摊价 = **{allocation_price:.4f} 元/MWh**；"
+            f"最终平均购电成本 = **{res['final_avg']:.4f} 元/MWh**；"
+            f"🌙 谷电比 = **{valley_ratio*100:.4f}%**"
+        )
 
-k3_share_ratio = st.slider("K3 价差分成比例（50%~100%）", 0.5, 1.0, 0.8, 0.05)
+    with st.expander("展开查看成本明细（福建）"):
+        ratio_real = contract_curve.sum() / max(user_curve.sum(), 1e-9)
+        st.write(f"- 总用电量：{res['total_mwh']:.4f} MWh")
+        st.write(f"- 实际中长期电量占比：{ratio_real*100:.4f}%")
+        st.write(f"- 中长期成本：{res['long_cost']:,.4f} 元")
+        st.write(f"- 现货偏差成本：{res['spot_cost']:,.4f} 元")
+        st.write(f"- 基础总购电成本（不含分摊）：{res['base_total_cost']:,.4f} 元")
+        if allocation_price is not None:
+            st.write(f"- 分摊成本：{res['allocation_cost']:,.4f} 元")
+        st.write(f"- 最终总购电成本：{res['final_total_cost']:,.4f} 元")
+
+    df = pd.DataFrame({
+        "用户用电(MWh)": user_curve,
+        "中长期(MWh)": contract_curve,
+        "偏差电量(MWh)": res["dev_curve"],
+    }, index=[f"{i}:00" for i in range(24)])
+    st.line_chart(df)
 
 # =====================================================================
-# 绿电套餐
+# 浙江模块
 # =====================================================================
-st.subheader("绿电套餐")
+elif province == "浙江":
+    st.header("二、浙江成本精算模块（48 点，典型负荷 + 分摊价）")
 
-g1, g2 = st.columns([1, 1])
-with g1:
-    green_ratio = st.slider("绿电比例", 0.0, 1.0, 0.20, 0.05)
-with g2:
-    green_fix_price = st.number_input(
-        "绿电价 (元/kWh)",
-        0.0000, 2.0000, 0.0200,
+    c1, c2, c3 = st.columns(3)
+    month = c1.selectbox("月份（用于 TOU 拆分 & 典型曲线选择）", list(range(1, 13)), index=11)
+    P_long = c2.number_input(
+        "中长期合同电价（元/MWh）",
+        0.0, 5000.0, 360.0000,
+        step=0.0001, format="%.4f"
+    )
+    ratio = c3.number_input(
+        "中长期比例（0~1，例如 0.90）",
+        0.0, 1.0, 0.9000,
         step=0.0001, format="%.4f"
     )
 
-if p_green_avg > 0:
-    ratio_to_avg = green_fix_price / p_green_avg * 100
-    st.caption(f"当前绿电价为批发绿电均值的 {ratio_to_avg:.2f}%")
-    if ratio_to_avg > 110:
-        st.warning(
-            f"⚠️ 当前绿电价 {green_fix_price:.4f} 元/kWh 高于批发均值 "
-            f"{p_green_avg:.4f} 的 110%，需市场风险提示。"
+    e1, e2, e3, e4 = st.columns(4)
+    尖 = e1.number_input("尖电量 (MWh)", 0.0, 1e9, 0.0, step=0.0001, format="%.4f")
+    峰 = e2.number_input("峰电量 (MWh)", 0.0, 1e9, 0.0, step=0.0001, format="%.4f")
+    平 = e3.number_input("平电量 (MWh)", 0.0, 1e9, 0.0, step=0.0001, format="%.4f")
+    谷 = e4.number_input("谷电量 (MWh)", 0.0, 1e9, 0.0, step=0.0001, format="%.4f")
+
+    user_curve = split_load_by_tou_zj(month, 尖, 峰, 平, 谷)
+    total_user_mwh = float(user_curve.sum())
+
+    contract_curve = make_contract_curve_zj(total_user_mwh, ratio, month)
+    long_price_curve = np.full(48, P_long, dtype=float)
+    spot_curve = spot_curve_48
+
+    use_allocation = st.checkbox("启用分摊价格（元/MWh）", value=False)
+    allocation_price = None
+    if use_allocation:
+        allocation_price = st.number_input(
+            "分摊单价（元/MWh）",
+            0.0, 1000.0, 10.0000,
+            step=0.0001, format="%.4f"
         )
 
-# =====================================================================
-# 执行收益计算
-# =====================================================================
-params_profit = {
-    "k1_ratio": k1_ratio,
-    "k2_ratio": k2_ratio,
-    "k3_ratio": k3_ratio,
-    "k2_float_percent": k2_float_percent,
-    "market_avg_price": market_avg_price,
-    "k3_share_ratio": k3_share_ratio,
-}
-params_profit, warn_list = enforce_rules_profit(params_profit)
+    res = calc_cost(user_curve, contract_curve, long_price_curve,
+                    spot_curve, allocation_price)
 
-results_profit = calc_profit_detailed(
-    total_power_mwh, wholesale_price,
-    k1_curve, params_profit["k1_ratio"],
-    params_profit["market_avg_price"], params_profit["k2_float_percent"], params_profit["k2_ratio"],
-    k3_input_curve, k3_is_factor, params_profit["k3_share_ratio"], params_profit["k3_ratio"],
-    green_ratio, green_fix_price,
-)
+    day_ratio = calc_daytime_ratio(user_curve)
+    st.write(f"🌞 白天用电占比（9–15 点）：**{day_ratio * 100:.4f}%**")
 
-st.subheader("收益结果")
-for w in warn_list:
-    st.warning(w)
-st.json(results_profit)
+    if allocation_price is None:
+        st.success(
+            f"📌 浙江：基础平均购电成本（不含分摊） = **{res['base_avg']:.4f} 元/MWh**"
+        )
+    else:
+        st.success(
+            f"📌 浙江：基础平均购电成本 = **{res['base_avg']:.4f} 元/MWh**；"
+            f"分摊价 = **{allocation_price:.4f} 元/MWh**；"
+            f"最终平均购电成本 = **{res['final_avg']:.4f} 元/MWh**"
+        )
+
+    with st.expander("展开查看成本明细（浙江）"):
+        ratio_real = contract_curve.sum() / max(user_curve.sum(), 1e-9)
+        st.write(f"- 总用电量：{res['total_mwh']:.4f} MWh")
+        st.write(f"- 实际中长期电量占比：{ratio_real*100:.4f}%")
+        st.write(f"- 中长期成本：{res['long_cost']:,.4f} 元")
+        st.write(f"- 现货偏差成本：{res['spot_cost']:,.4f} 元")
+        st.write(f"- 基础总购电成本（不含分摊）：{res['base_total_cost']:,.4f} 元")
+        if allocation_price is not None:
+            st.write(f"- 分摊成本：{res['allocation_cost']:,.4f} 元")
+        st.write(f"- 最终总购电成本：{res['final_total_cost']:,.4f} 元")
+
+    time_index_48 = [f"{h:02d}:{m:02d}" for h in range(24) for m in (0, 30)]
+    df = pd.DataFrame({
+        "用户用电(MWh)": user_curve,
+        "中长期(MWh)": contract_curve,
+        "偏差电量(MWh)": res["dev_curve"],
+    }, index=time_index_48)
+    st.line_chart(df)
 
 # =====================================================================
-# 市场均价敏感性分析
+# 山东模块
 # =====================================================================
-st.subheader("敏感性分析：市场均价 ±30%")
+else:  # 山东
+    st.header("二、山东成本精算模块（尖峰/峰/平/谷/深谷 + 直线典型曲线，24 点）")
 
-changes = np.arange(-0.3, 0.31, 0.05)
-sens_rows = []
-for c in changes:
-    r = calc_profit_detailed(
-        total_power_mwh, wholesale_price,
-        k1_curve, params_profit["k1_ratio"],
-        params_profit["market_avg_price"] * (1 + c), params_profit["k2_float_percent"], params_profit["k2_ratio"],
-        k3_input_curve, k3_is_factor, params_profit["k3_share_ratio"], params_profit["k3_ratio"],
-        green_ratio, green_fix_price,
+    c1, c2, c3 = st.columns(3)
+    month = c1.selectbox("月份（用于 TOU 拆分）", list(range(1, 13)), index=5)
+    P_long = c2.number_input(
+        "中长期合同电价（元/MWh）",
+        0.0, 5000.0, 360.0000,
+        step=0.0001, format="%.4f"
     )
-    sens_rows.append([c * 100, r["单位收益(元/kWh)"]])
+    ratio = c3.number_input(
+        "中长期比例（0~1，例如 0.85）",
+        0.0, 1.0, 0.8500,
+        step=0.0001, format="%.4f"
+    )
 
-df_sens = pd.DataFrame(sens_rows, columns=["市场均价变动(%)", "单位收益(元/kWh)"]).set_index("市场均价变动(%)")
-st.line_chart(df_sens)
+    e1, e2, e3, e4, e5 = st.columns(5)
+    尖峰 = e1.number_input("尖峰电量 (MWh)", 0.0, 1e9, 0.0, step=0.0001, format="%.4f")
+    峰 = e2.number_input("峰电量 (MWh)", 0.0, 1e9, 0.0, step=0.0001, format="%.4f")
+    平 = e3.number_input("平电量 (MWh)", 0.0, 1e9, 0.0, step=0.0001, format="%.4f")
+    谷 = e4.number_input("谷电量 (MWh)", 0.0, 1e9, 0.0, step=0.0001, format="%.4f")
+    深谷 = e5.number_input("深谷电量 (MWh)", 0.0, 1e9, 0.0, step=0.0001, format="%.4f")
 
+    user_curve = split_load_by_tou_sd(month, 尖峰, 峰, 平, 谷, 深谷)
+    total_user_mwh = float(user_curve.sum())
+
+    contract_curve = make_contract_curve_sd(total_user_mwh, ratio)
+    long_price_curve = np.full(24, P_long, dtype=float)
+    spot_curve = spot_curve_24
+
+    use_allocation = st.checkbox("启用分摊价格（元/MWh）", value=False)
+    allocation_price = None
+    if use_allocation:
+        allocation_price = st.number_input(
+            "分摊单价（元/MWh）",
+            0.0, 1000.0, 10.0000,
+            step=0.0001, format="%.4f"
+        )
+
+    res = calc_cost(user_curve, contract_curve, long_price_curve,
+                    spot_curve, allocation_price)
+
+    day_ratio = calc_daytime_ratio(user_curve)
+    st.write(f"🌞 白天用电占比（9–15 点）：**{day_ratio * 100:.4f}%**")
+
+    if allocation_price is None:
+        st.success(
+            f"📌 山东：基础平均购电成本（不含分摊） = **{res['base_avg']:.4f} 元/MWh**"
+        )
+    else:
+        st.success(
+            f"📌 山东：基础平均购电成本 = **{res['base_avg']:.4f} 元/MWh**；"
+            f"分摊价 = **{allocation_price:.4f} 元/MWh**；"
+            f"最终平均购电成本 = **{res['final_avg']:.4f} 元/MWh**"
+        )
+
+    with st.expander("展开查看成本明细（山东）"):
+        ratio_real = contract_curve.sum() / max(user_curve.sum(), 1e-9)
+        st.write(f"- 总用电量：{res['total_mwh']:.4f} MWh")
+        st.write(f"- 实际中长期电量占比：{ratio_real*100:.4f}%")
+        st.write(f"- 中长期成本：{res['long_cost']:,.4f} 元")
+        st.write(f"- 现货偏差成本：{res['spot_cost']:,.4f} 元")
+        st.write(f"- 基础总购电成本（不含分摊）：{res['base_total_cost']:,.4f} 元")
+        if allocation_price is not None:
+            st.write(f"- 分摊成本：{res['allocation_cost']:,.4f} 元")
+        st.write(f"- 最终总购电成本：{res['final_total_cost']:,.4f} 元")
+
+    df = pd.DataFrame({
+        "用户用电(MWh)": user_curve,
+        "中长期(MWh)": contract_curve,
+        "偏差电量(MWh)": res["dev_curve"],
+    }, index=[f"{i}:00" for i in range(24)])
+    st.line_chart(df)
