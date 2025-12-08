@@ -317,7 +317,7 @@ TOU_ZJ_SUMMER_WINTER_48 = [
     "尖","尖","尖","尖",
     "峰","峰","峰","峰","峰","峰",
     "峰","峰","峰","峰","峰","峰",
-    "平","平",  
+    "平","平"  
 ]
 
 def get_tou_zj_by_month(month: int):
@@ -931,4 +931,5 @@ else:  # 山东
         "偏差电量(MWh)": res["dev_curve"],
     }, index=[f"{i}:00" for i in range(24)])
     st.line_chart(df)
+
 
