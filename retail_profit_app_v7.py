@@ -695,7 +695,7 @@ if province == "安徽":
         "用户用电(MWh)": user_curve,
         "中长期(MWh)": contract_curve,
         "偏差电量(MWh)": res["dev_curve"],
-    }, index=[f"{i}:00" for i in range(24)])
+    }, index=[f"{i:02d}:00" for i in range(24)])
     st.line_chart(df)
 
 # =====================================================================
@@ -775,7 +775,7 @@ elif province == "福建":
         "用户用电(MWh)": user_curve,
         "中长期(MWh)": contract_curve,
         "偏差电量(MWh)": res["dev_curve"],
-    }, index=[f"{i}:00" for i in range(24)])
+    }, index=[f"{i:02d}:00" for i in range(24)])
     st.line_chart(df)
 
 # =====================================================================
@@ -929,8 +929,9 @@ else:  # 山东
         "用户用电(MWh)": user_curve,
         "中长期(MWh)": contract_curve,
         "偏差电量(MWh)": res["dev_curve"],
-    }, index=[f"{i}:00" for i in range(24)])
+    },}, index=[f"{i:02d}:00" for i in range(24)]))
     st.line_chart(df)
+
 
 
 
